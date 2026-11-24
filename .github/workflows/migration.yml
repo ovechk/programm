@@ -1,0 +1,87 @@
+name: Mattermost Migration
+on:
+  push:
+    branches: [ "migration" ]
+  workflow_dispatch:
+
+env:
+  COMPOSE_FILE: docker-compose.prod.yml
+
+jobs:
+  migrate-and-deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check Migration Status
+        id: check_status
+        shell: powershell
+        run: |
+          $flagFile = "$env:USERPROFILE\.migration_clean"
+          if (Test-Path $flagFile) {
+            echo "already_migrated=true" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "already_migrated=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Backup Legacy MySQL
+        if: steps.check_status.outputs.already_migrated == 'false'
+        shell: powershell
+        run: |
+          docker exec mattermost-mysql mysqldump -u root -p${{ secrets.DB_MYSQL_ROOT_PASSWORD }} mattermost > "backup_${{ github.run_id }}.sql"
+
+      - name: Start Target PostgreSQL
+        if: steps.check_status.outputs.already_migrated == 'false'
+        shell: powershell
+        run: |
+          docker compose -f ${{ env.COMPOSE_FILE }} up -d mattermost-postgres
+          Start-Sleep -Seconds 15
+
+      - name: Run pgloader
+        if: steps.check_status.outputs.already_migrated == 'false'
+        shell: powershell
+        run: |
+          docker run --rm --network=legacy_mattermost_network mattermost/mattermost-pgloader:latest pgloader --with "include drop" mysql://root:${{ secrets.DB_MYSQL_ROOT_PASSWORD }}@mattermost-mysql/mattermost postgresql://mmuser:${{ secrets.DB_POSTGRES_PASSWORD }}@mattermost-postgres/mattermost
+
+      - name: Mark Migration as Completed
+        if: steps.check_status.outputs.already_migrated == 'false'
+        shell: powershell
+        run: |
+          New-Item -ItemType File -Path "$env:USERPROFILE\.migration_clean" -Force
+
+      - name: Deploy Upgraded Stack
+        shell: powershell
+        run: |
+          docker rm -f mattermost
+          docker rm -f mattermost-mysql
+          docker compose -f ${{ env.COMPOSE_FILE }} up -d --build --remove-orphans
+          Start-Sleep -Seconds 30
+
+      - name: Run Health Checks
+        shell: powershell
+        run: |
+          $maxAttempts = 10
+          $attempt = 1
+          $success = $false
+          
+          while ($attempt -le $maxAttempts -and -not $success) {
+            Start-Sleep -Seconds 15
+            try {
+              $response = Invoke-RestMethod -Uri "http://localhost:8065/api/v4/system/ping" -TimeoutSec 5
+              if ($response.status -eq "OK") {
+                Write-Host "Mattermost is UP!"
+                $success = $true
+              }
+            } catch {
+              Write-Host "Attempt $attempt failed. Mattermost is still starting up..."
+              $attempt++
+            }
+          }
+          
+          if (-not $success) {
+            Write-Host "Health check failed after $maxAttempts attempts."
+            docker compose -f ${{ env.COMPOSE_FILE }} logs
+            exit 1
+          }
