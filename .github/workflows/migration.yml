@@ -27,13 +27,17 @@ jobs:
           }
 
       - name: Backup Legacy MySQL
-        if: steps.check_status.outputs.already_migrated == 'false'
         shell: powershell
         run: |
-          docker exec mattermost-mysql mysqldump -u root -p${{ secrets.DB_MYSQL_ROOT_PASSWORD }} mattermost > "backup_${{ github.run_id }}.sql"
-      
+          $containerExists = docker ps -a --filter "name=mattermost-mysql" --format "{{.Names}}"
+          if ($containerExists -match "mattermost-mysql") {
+            docker exec mattermost-mysql mysqldump -u root -p${{ secrets.DB_MYSQL_ROOT_PASSWORD }} mattermost > "backup_${{ github.run_id }}.sql"
+          } else {
+            echo "MySQL container not found. Creating empty placeholder file for artifact."
+            New-Item -ItemType File -Path "backup_${{ github.run_id }}.sql" -Force
+          }
+
       - name: Upload Backup Artifact
-        if: steps.check_status.outputs.already_migrated == 'false'
         uses: actions/upload-artifact@v4
         with:
           name: mysql-backup-file
