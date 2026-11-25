@@ -31,7 +31,15 @@ jobs:
         shell: powershell
         run: |
           docker exec mattermost-mysql mysqldump -u root -p${{ secrets.DB_MYSQL_ROOT_PASSWORD }} mattermost > "backup_${{ github.run_id }}.sql"
-
+      
+      - name: Upload Backup Artifact
+        if: steps.check_status.outputs.already_migrated == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql-backup-file
+          path: backup_*.sql
+          retention-days: 5
+          
       - name: Start Target PostgreSQL
         if: steps.check_status.outputs.already_migrated == 'false'
         shell: powershell
